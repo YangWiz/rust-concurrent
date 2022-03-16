@@ -20,7 +20,11 @@ impl Drop for Worker {
     /// When dropped, the thread's `JoinHandle` must be `join`ed.  If the worker panics, then this
     /// function should panic too.  NOTE: that the thread is detached if not `join`ed explicitly.
     fn drop(&mut self) {
-        todo!()
+        let _thread = self
+            .thread
+            .take()
+            .expect("failed to take the JoinHandle!")
+            .join().expect("panic!");
     }
 }
 
@@ -35,12 +39,15 @@ struct ThreadPoolInner {
 impl ThreadPoolInner {
     /// Increment the job count.
     fn start_job(&self) {
-        todo!()
+        let mut job_counter = self.job_count.lock().unwrap();
+        *job_counter += 1;
     }
 
     /// Decrement the job count.
     fn finish_job(&self) {
-        todo!()
+        let mut job_counter = self.job_count.lock().unwrap();
+        *job_counter -= 1;
+        self.empty_condvar.notify_one();
     }
 
     /// Wait until the job count becomes 0.
@@ -48,7 +55,11 @@ impl ThreadPoolInner {
     /// NOTE: We can optimize this function by adding another field to `ThreadPoolInner`, but let's
     /// not care about that in this homework.
     fn wait_empty(&self) {
-        todo!()
+        let mut job_counter = self.job_count.lock().unwrap();
+
+        while *job_counter != 0 {
+            job_counter = self.empty_condvar.wait(job_counter).unwrap();
+        }
     }
 }
 
@@ -64,8 +75,44 @@ impl ThreadPool {
     /// Create a new ThreadPool with `size` threads. Panics if the size is 0.
     pub fn new(size: usize) -> Self {
         assert!(size > 0);
+        let (sx, rx) = crossbeam_channel::unbounded::<Job>();
+        let mut workers = Vec::new();
+        for i in 0..size {
+            // crossbeam channel is mpmc, so clone directly is ok.
+            let rx = rx.clone();
+            let handler = thread::spawn(move || {
+                loop {
+                    // blocked! drop sender.
+                    // crossbeam-channel can detect close when all sender or all receiver are closed.
+                    // close the sender.
+                    match rx.recv() {
+                        Ok(task) => {
+                            task.0()
+                        },
+                        Err(_) => {
+                            break;
+                        }
+                    };
+                }
+            });
 
-        todo!()
+            let worker = Worker {
+                id: i,
+                thread: Some(handler),
+            };
+            workers.push(worker);
+        }
+
+        let pool_inner = ThreadPoolInner {
+            job_count: Mutex::new(0),
+            empty_condvar: Condvar::new(),
+        };
+
+        ThreadPool {
+            workers,
+            job_sender: Some(sx),
+            pool_inner: Arc::new(pool_inner),
+        }
     }
 
     /// Execute a new job in the thread pool.
@@ -73,13 +120,31 @@ impl ThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        todo!()
+        let sender = self
+            .job_sender
+            .as_ref()
+            .unwrap()
+            .clone();
+       
+        // Arc can be sent to another thread.
+        let status= self.pool_inner.clone();
+
+        let job =  Job(Box::new(move || {
+            // much more cleaner than before, wrap all the tasks in a single closure.
+            status.start_job();
+            f();
+            status.finish_job();
+        }));
+
+        sender.send(job).unwrap();
     }
 
     /// Block the current thread until all jobs in the pool have been executed.  NOTE: This method
     /// has nothing to do with `JoinHandle::join`.
     pub fn join(&self) {
-        todo!()
+        // wait empty maybe.
+        // wait_empty: return until the number of tasks become 0 => all tasks have been executed.
+        self.pool_inner.clone().wait_empty();
     }
 }
 
@@ -87,6 +152,13 @@ impl Drop for ThreadPool {
     /// When dropped, all worker threads' `JoinHandle` must be `join`ed. If the thread panicked,
     /// then this function should panic too.
     fn drop(&mut self) {
-        todo!()
+        // wait until all the tasks have been finished.
+        self.join();
+
+        // drop the sender => drop the recv => drop the worker => drop everything. 
+        drop(self
+            .job_sender
+            .take()
+            .unwrap());
     }
 }

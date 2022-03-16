@@ -15,7 +15,7 @@ use super::statistics::Report;
 fn very_expensive_computation_that_takes_a_few_seconds(key: String) -> String {
     println!("[handler] doing computation for key: {}", key);
     thread::sleep(Duration::from_secs(3));
-    format!("{}🐕", key)
+    format!(r#"{}🐕"#, key)
 }
 
 /// Hello handler with a cache.
