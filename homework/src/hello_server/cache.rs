@@ -1,11 +1,10 @@
 //! Thread-safe key/value cache.
 
-use std::collections::hash_map::{Entry, HashMap, DefaultHasher};
+use std::collections::hash_map::{HashMap, DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, RwLock};
-use std::rc::Rc;
 
-const BUCKET_NUM: u64 = 16;
+const BUCKET_NUM: u64 = 100;
 /// Cache that remembers the result for each key.
 #[derive(Debug)]
 pub struct Cache<K, V> {
@@ -13,14 +12,14 @@ pub struct Cache<K, V> {
     // specification for `get_or_insert_with`.
     // lock for specific key.
     inner: Arc<RwLock<HashMap<K, V>>>,
-    locks: Arc<Vec<Rc<Mutex<()>>>>,
+    locks: Arc<Vec<Arc<Mutex<()>>>>,
 }
 
 impl<K, V> Default for Cache<K, V> {
     fn default() -> Self {
         Cache {
             inner: Arc::new(RwLock::new(HashMap::new())),
-            locks: Arc::new((0..BUCKET_NUM).map(|_| { Rc::new(Mutex::new(()))}).collect()),
+            locks: Arc::new((0..BUCKET_NUM).map(|_| { Arc::new(Mutex::new(())) }).collect()),
         }
     }
 }
@@ -46,7 +45,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         // read() => lock r, increment a state, lock g | write() => wait g unlock => deadlock.
         let cache = self.inner.clone();
         let locks = self.locks.clone();
-        let mut key_lock;
+        let key_lock_pair;
 
         {
             let map = cache.read().unwrap();
@@ -57,25 +56,20 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
                 },
                 None => {
                     let index = (calculate_hash(&key) % BUCKET_NUM) as usize;
-                    key_lock = locks[index].clone();
+                    key_lock_pair = locks[index].clone();
                 },
             }; 
             // reader lock drops here.
         }
-        match key_lock.try_lock() {
-            Ok(_) => {
-
-            },
-            Err(_) => {
-                // todo: CondVar.
-                return cache.read().unwrap().get(&key).unwrap().clone();
-            }
-        }
-        
-        // bad!
+        let _lock = key_lock_pair.lock().unwrap();
+        // unused lockguard will be droped immediately.
+        match cache.read().unwrap().get(&key) {
+            Some(val) => return val.clone(),
+            None => {},
+        };
         let val = f(key.clone());
         let mut map = self.inner.write().unwrap();
         map.insert(key, val.clone());
-        val
+        return val;
     }
 }
